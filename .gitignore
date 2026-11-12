@@ -1,0 +1,7 @@
+# Runtime data created by the stack
+oe-node-logs/
+oe-node-databases/
+oe-node-c2d-storage/
+
+# Local overrides (copy .env and keep secrets out of git)
+.env.local

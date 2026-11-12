@@ -1,0 +1,194 @@
+# =============================================================================
+# Ocean Enterprise stack — Marketplace + OE Node (no SSI)
+# Following docs.oceanenterprise.io/infrastructure (Deployment Guides)
+#
+#   Marketplace  v1.5.2  ->  http://localhost:8008
+#   OE Node      v4.2.1  ->  http://localhost:8000  (API port)
+#   Elasticsearch 8.19.3 (node's indexer DB, internal only)
+#
+# Versions fixed per the OE Compatibility Matrix (market v1.5.1/v1.5.2 <->
+# OE Node v4.2.1). All tunables live in ./.env — see the [CUSTOMIZE] /
+# [PLACEHOLDER] markers there.
+#
+# Launch with:  ./start.sh   (sets the node startBlock = head - 1 week,
+#                             then `docker compose up -d`)
+# =============================================================================
+
+name: ocean-enterprise
+
+services:
+  # ---------------------------------------------------------------------------
+  # OE Node (provider/indexer/encryptor) — docs:
+  # /infrastructure/oe-node-installation-and-configuration
+  # ---------------------------------------------------------------------------
+  oe-node:
+    # [CUSTOMIZE] pin the version approved by your compatibility review
+    image: oceanenterprise/oe-node:v4.2.1
+    # [CUSTOMIZE] OE images are published for amd64 only; on arm64 hosts this
+    # runs them under QEMU emulation (slow). Remove on native amd64 servers.
+    platform: linux/amd64
+    container_name: oe-node
+    restart: unless-stopped
+    ports:
+      # [CUSTOMIZE] HTTP API port consumed by the marketplace/browser
+      - '${NODE_HTTP_PORT:-8000}:8000'
+      # Optional extras from the official compose (dashboard/admin APIs) —
+      # uncomment if you need them:
+      # - '9000:9000'
+      # - '9001:9001'
+      # - '9002:9002'
+      # - '9003:9003'
+      # - '9005:9005'
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+        restart: true
+    environment:
+      # --- REQUIRED -----------------------------------------------------------
+      # [PLACEHOLDER] fabricated key (0x00..0xff pattern) — replace in .env
+      PRIVATE_KEY: ${NODE_PRIVATE_KEY}
+      # --- Blockchain RPC (OP Sepolia) ---------------------------------------
+      # startBlock is set by start.sh to (head - ~1 week) on first launch.
+      # [CUSTOMIZE] chunkSize / provider URL for your expected workload
+      RPCS: '{"11155420":{"rpc":"${RPC_URL}","chainId":11155420,"network":"optimism_sepolia","chunkSize":50,"startBlock":${START_BLOCK}}}'
+      INDEXER_NETWORKS: '[11155420]'
+      # --- Elasticsearch (indexer DB) ----------------------------------------
+      DB_TYPE: elasticsearch
+      DB_URL: http://elasticsearch:9200
+      DB_USERNAME: elastic
+      # [PLACEHOLDER] must match ELASTIC_PASSWORD in .env
+      DB_PASSWORD: ${ELASTIC_PASSWORD}
+      # --- IPFS (public gateway required by docs) -----------------------------
+      IPFS_GATEWAY: ${IPFS_GATEWAY}
+      ARWEAVE_GATEWAY: https://arweave.net/
+      # --- Node fees (paid in devEURAU on OP Sepolia) -------------------------
+      # [CUSTOMIZE] node operator fee policy
+      FEE_TOKENS: '{"11155420":"${DEVEURAU_ADDRESS}"}'
+      FEE_AMOUNT: ${NODE_FEE_AMOUNT}
+      # --- HTTP ----------------------------------------------------------------
+      HTTP_API_PORT: '8000'
+      # --- SSI DISABLED ---------------------------------------------------------
+      # Empty POLICY_SERVER_URL = address-based verification only (no SSI).
+      POLICY_SERVER_URL: ''
+      POLICY_SERVER_API_KEY: ''
+      # --- Ownership / admin -----------------------------------------------------
+      # [CUSTOMIZE] real owner info + admin address in .env
+      NODE_OWNER_INFO: ${NODE_OWNER_INFO}
+      ALLOWED_ADMINS: ${ALLOWED_ADMINS}
+      # --- Logs / rate limits ------------------------------------------------------
+      LOG_LEVEL: info
+      MAX_REQ_PER_MINUTE: '10000'
+      MAX_CONNECTIONS_PER_MINUTE: '10000'
+      DASHBOARD: 'true'
+    volumes:
+      - ./oe-node-logs:/usr/src/app/logs
+      - ./oe-node-c2d-storage:/usr/src/app/c2d_storage
+      - ./oe-node-databases:/usr/src/app/databases
+      # [CUSTOMIZE] Uncomment ONLY if you enable a Compute-to-Data environment
+      # (DOCKER_COMPUTE_ENVIRONMENTS). Grants the node container Docker control:
+      # - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Elasticsearch — indexer database for the OE Node (internal network only;
+  # port published for diagnostics only)
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.3
+    container_name: elasticsearch
+    restart: unless-stopped
+    ports:
+      # [CUSTOMIZE] drop this mapping in production; the node reaches ES via
+      # the internal `backend` network at http://elasticsearch:9200
+      - '${ES_HTTP_PORT:-9200}:9200'
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: 'true'
+      xpack.security.enabled: 'true'
+      xpack.security.http.ssl.enabled: 'false'
+      # [PLACEHOLDER] fabricated password pattern — generate a real one
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      # [CUSTOMIZE] raise heap for production workloads (min specs: 2 cores/16GB)
+      ES_JAVA_OPTS: '-Xms1g -Xmx1g'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -s http://localhost:9200/_cluster/health | grep -vq ''"status":"red"''']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # OE Marketplace — docs:
+  # /infrastructure/marketplace-installation-and-configuration
+  # ---------------------------------------------------------------------------
+  ocean-market:
+    # [CUSTOMIZE] pin the version approved by your compatibility review
+    image: oceanenterprise/market:v1.5.2
+    # [CUSTOMIZE] see note on oe-node platform (amd64-only images)
+    platform: linux/amd64
+    container_name: ocean-market
+    restart: unless-stopped
+    ports:
+      # [CUSTOMIZE] public port of the marketplace UI
+      - '${MARKET_HTTP_PORT:-8008}:8008'
+    depends_on:
+      - oe-node
+    environment:
+      NODE_ENV: production
+      # --- OE Nodes -------------------------------------------------------------
+      # Default node: encrypts at publish, decrypts at consume, serves C2D.
+      NEXT_PUBLIC_PROVIDER_URL: ${OE_NODE_URL}
+      # Metadata cache(s) the catalogue is read from (v1.4.1+: JSON array —
+      # must include the default node)
+      NEXT_PUBLIC_METADATACACHE_URI: '["${OE_NODE_URL}/"]'
+      # Nodes whose assets appear in the catalogue / can encrypt new assets
+      NEXT_PUBLIC_NODE_URI_INDEXED: '["${OE_NODE_URL}/"]'
+      # --- Blockchain RPC (OP Sepolia) --------------------------------------------
+      NEXT_PUBLIC_NODE_URI_MAP: '{"11155420":"${RPC_URL}"}'
+      NEXT_PUBLIC_NODE_URI: ${RPC_URL}
+      # --- IPFS (Pinata) -------------------------------------------------------------
+      # [PLACEHOLDER] IPFS_JWT in .env is a placeholder — get a free Pinata JWT
+      # at https://app.pinata.cloud or publishing will fail.
+      NEXT_PUBLIC_IPFS_GATEWAY: ${IPFS_GATEWAY}
+      NEXT_PUBLIC_IPFS_UPLOAD_URL: ${IPFS_UPLOAD_URL}
+      NEXT_PUBLIC_IPFS_DELETE_URL: ${IPFS_DELETE_URL}
+      IPFS_JWT: ${IPFS_JWT}
+      NEXT_PUBLIC_IPFS_UNPIN_FILES: 'true'
+      # --- Currencies & fees (devEURAU on OP Sepolia) --------------------------------
+      # Currencies accepted by the market (must be supported by OEC contracts)
+      NEXT_PUBLIC_ALLOWED_ERC20_ADDRESSES: '{"11155420":["${DEVEURAU_ADDRESS}"]}'
+      # [CUSTOMIZE] fixed fee per purchase (18-decimal units) / percentage fee
+      NEXT_PUBLIC_CONSUME_MARKET_ORDER_FEE_MAP: ${MARKET_ORDER_FEE_MAP}
+      NEXT_PUBLIC_CONSUME_MARKET_FEE: ${MARKET_PERCENT_FEE}
+      # [PLACEHOLDER] fabricated wallet pattern — set your fee collector address
+      NEXT_PUBLIC_MARKET_FEE_ADDRESS: ${MARKET_FEE_ADDRESS}
+      # --- SSI DISABLED (address-based access control only) ---------------------------
+      NEXT_PUBLIC_SSI_ENABLED: 'false'
+      # --- Dataspace ---------------------------------------------------------------------
+      NEXT_PUBLIC_DATASPACE: ${DATASPACE}
+      # --- Others --------------------------------------------------------------------------
+      # Encrypt the asset DDO at publish time (requires the OE Node above)
+      NEXT_PUBLIC_ENCRYPT_ASSET: 'true'
+      NEXT_PUBLIC_HIDE_ONBOARDING_MODULE_BY_DEFAULT: 'false'
+      NEXT_PUBLIC_MAX_LICENSE_FILE_SIZE_KB: '700'
+      # Analytics disabled (self-hosted default)
+      # [CUSTOMIZE] set NEXT_PUBLIC_POSTHOG_KEY/HOST to enable PostHog analytics
+      # [CUSTOMIZE] imprint/T&C/privacy URLs: leave unset to use OEC defaults
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  esdata:
