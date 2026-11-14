@@ -2,16 +2,22 @@
 # Ocean Enterprise stack — Marketplace + OE Node (no SSI)
 # Following docs.oceanenterprise.io/infrastructure (Deployment Guides)
 #
-#   Marketplace  v1.5.2  ->  http://localhost:8008
-#   OE Node      v4.2.1  ->  http://localhost:8000  (API port)
-#   Elasticsearch 8.19.3 (node's indexer DB, internal only)
+#   Marketplace      ->  http://localhost:8080
+#   OE Node          ->  http://localhost:8000  (API port)
+#   Elasticsearch 9.3.4 (node's indexer DB, internal only)
 #
-# Versions fixed per the OE Compatibility Matrix (market v1.5.1/v1.5.2 <->
-# OE Node v4.2.1). All tunables live in ./.env — see the [CUSTOMIZE] /
-# [PLACEHOLDER] markers there.
+# Images come from the AgrospAI registry (mirrors of the Ocean Enterprise
+# builds, tag "latest"):
+#   registry.agrospai.udl.cat/library/oe-node:latest
+#   registry.agrospai.udl.cat/library/enterprise-market:latest
+# Because the tag is "latest", compose keeps whatever image is already cached:
+# run `docker compose pull` to move to the newest build.
 #
-# Launch with:  ./start.sh   (sets the node startBlock = head - 1 week,
-#                             then `docker compose up -d`)
+# All tunables live in ./.env, which ./customize.sh generates from prompts
+# (see .env.example for the documented defaults).
+#
+# Launch with:  ./start.sh   (unlocks the node keystore, asks which block to
+#                             index from, then `docker compose up -d`)
 # =============================================================================
 
 name: ocean-enterprise
@@ -22,11 +28,9 @@ services:
   # /infrastructure/oe-node-installation-and-configuration
   # ---------------------------------------------------------------------------
   oe-node:
-    # [CUSTOMIZE] pin the version approved by your compatibility review
-    image: oceanenterprise/oe-node:v4.2.1
-    # [CUSTOMIZE] OE images are published for amd64 only; on arm64 hosts this
-    # runs them under QEMU emulation (slow). Remove on native amd64 servers.
-    platform: linux/amd64
+    # [CUSTOMIZE] pin the version/tag approved by your compatibility review
+    # "latest" = newest build mirrored in the AgrospAI registry.
+    image: registry.agrospai.udl.cat/library/oe-node:latest
     container_name: oe-node
     restart: unless-stopped
     ports:
@@ -45,10 +49,11 @@ services:
         restart: true
     environment:
       # --- REQUIRED -----------------------------------------------------------
-      # [PLACEHOLDER] fabricated key (0x00..0xff pattern) — replace in .env
+      # Injected by ./start.sh from secrets/node.keystore.json; it is never
+      # written to .env. Export it yourself if you run `docker compose` directly.
       PRIVATE_KEY: ${NODE_PRIVATE_KEY}
       # --- Blockchain RPC (OP Sepolia) ---------------------------------------
-      # startBlock is set by start.sh to (head - ~1 week) on first launch.
+      # startBlock is set by start.sh
       # [CUSTOMIZE] chunkSize / provider URL for your expected workload
       RPCS: '{"11155420":{"rpc":"${RPC_URL}","chainId":11155420,"network":"optimism_sepolia","chunkSize":50,"startBlock":${START_BLOCK}}}'
       INDEXER_NETWORKS: '[11155420]'
@@ -67,10 +72,9 @@ services:
       FEE_AMOUNT: ${NODE_FEE_AMOUNT}
       # --- HTTP ----------------------------------------------------------------
       HTTP_API_PORT: '8000'
-      # --- SSI DISABLED ---------------------------------------------------------
-      # Empty POLICY_SERVER_URL = address-based verification only (no SSI).
-      POLICY_SERVER_URL: ''
-      POLICY_SERVER_API_KEY: ''
+      # --- To disable SSI keep both commented ----------------------------------
+      # POLICY_SERVER_URL: http://policy-server:8001
+      # POLICY_SERVER_API_KEY: ${POLICY_SERVER_API_KEY}
       # --- Ownership / admin -----------------------------------------------------
       # [CUSTOMIZE] real owner info + admin address in .env
       NODE_OWNER_INFO: ${NODE_OWNER_INFO}
@@ -95,7 +99,7 @@ services:
   # port published for diagnostics only)
   # ---------------------------------------------------------------------------
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.3
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.3.4
     container_name: elasticsearch
     restart: unless-stopped
     ports:
@@ -131,27 +135,27 @@ services:
   # /infrastructure/marketplace-installation-and-configuration
   # ---------------------------------------------------------------------------
   ocean-market:
-    # [CUSTOMIZE] pin the version approved by your compatibility review
-    image: oceanenterprise/market:v1.5.2
-    # [CUSTOMIZE] see note on oe-node platform (amd64-only images)
-    platform: linux/amd64
+    image: registry.agrospai.udl.cat/library/enterprise-market:latest
     container_name: ocean-market
     restart: unless-stopped
     ports:
-      # [CUSTOMIZE] public port of the marketplace UI
-      - '${MARKET_HTTP_PORT:-8008}:8008'
+      # [CUSTOMIZE] public port of the marketplace UI (container listens on 8008)
+      - '${MARKET_HTTP_PORT:-8080}:8008'
     depends_on:
       - oe-node
     environment:
       NODE_ENV: production
       # --- OE Nodes -------------------------------------------------------------
       # Default node: encrypts at publish, decrypts at consume, serves C2D.
+      # KEEP IT SLASH-FREE
       NEXT_PUBLIC_PROVIDER_URL: ${OE_NODE_URL}
       # Metadata cache(s) the catalogue is read from (v1.4.1+: JSON array —
-      # must include the default node)
+      # must include the default node). This one takes the slash.
       NEXT_PUBLIC_METADATACACHE_URI: '["${OE_NODE_URL}/"]'
-      # Nodes whose assets appear in the catalogue / can encrypt new assets
-      NEXT_PUBLIC_NODE_URI_INDEXED: '["${OE_NODE_URL}/"]'
+      # Nodes whose assets appear in the catalogue / can encrypt new assets.
+      # Slash-free too: the market appends "/" to build the clause and the node
+      # strips it again, so the stored (slash-free) endpoint matches.
+      NEXT_PUBLIC_NODE_URI_INDEXED: '["${OE_NODE_URL}"]'
       # --- Blockchain RPC (OP Sepolia) --------------------------------------------
       NEXT_PUBLIC_NODE_URI_MAP: '{"11155420":"${RPC_URL}"}'
       NEXT_PUBLIC_NODE_URI: ${RPC_URL}
@@ -169,7 +173,6 @@ services:
       # [CUSTOMIZE] fixed fee per purchase (18-decimal units) / percentage fee
       NEXT_PUBLIC_CONSUME_MARKET_ORDER_FEE_MAP: ${MARKET_ORDER_FEE_MAP}
       NEXT_PUBLIC_CONSUME_MARKET_FEE: ${MARKET_PERCENT_FEE}
-      # [PLACEHOLDER] fabricated wallet pattern — set your fee collector address
       NEXT_PUBLIC_MARKET_FEE_ADDRESS: ${MARKET_FEE_ADDRESS}
       # --- SSI DISABLED (address-based access control only) ---------------------------
       NEXT_PUBLIC_SSI_ENABLED: 'false'
@@ -183,6 +186,9 @@ services:
       # Analytics disabled (self-hosted default)
       # [CUSTOMIZE] set NEXT_PUBLIC_POSTHOG_KEY/HOST to enable PostHog analytics
       # [CUSTOMIZE] imprint/T&C/privacy URLs: leave unset to use OEC defaults
+      # --- AGROPORTAL for ontology term suggestions) --------------------------
+      # AGROPORTAL_API_KEY=<your-agroportal-api-key>
+
     networks:
       - backend
 
