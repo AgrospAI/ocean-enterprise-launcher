@@ -19,10 +19,224 @@ oe_die()  { printf '%sERROR:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 oe_have() { command -v "$1" >/dev/null 2>&1; }
 
+# ------------------------------------------------------------ platform info ---
+# -> macos | debian | rhel | arch | suse | linux | unknown
+oe_os_family() {
+  case "$(uname -s)" in
+    Darwin) printf 'macos' ;;
+    Linux)
+      local ids=''
+      if [ -r /etc/os-release ]; then
+        # subshell: distro variables must not leak into the caller's scope
+        ids=$(. /etc/os-release >/dev/null 2>&1; printf '%s %s' "${ID:-}" "${ID_LIKE:-}")
+      fi
+      case " $ids " in
+        *debian*|*ubuntu*)                       printf 'debian' ;;
+        *rhel*|*fedora*|*centos*|*rocky*|*alma*) printf 'rhel' ;;
+        *arch*)                                  printf 'arch' ;;
+        *suse*|*opensuse*)                       printf 'suse' ;;
+        *)                                       printf 'linux' ;;
+      esac ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# package manager actually present -> apt-get|dnf|yum|pacman|zypper|apk|brew|none
+# (distro IDs in /etc/os-release are unreliable on containers and appliances,
+#  while the available package manager is what actually solves the problem)
+oe_pkg_mgr() {
+  local m
+  for m in apt-get dnf yum pacman zypper apk brew; do
+    if oe_have "$m"; then printf '%s' "$m"; return; fi
+  done
+  printf 'none'
+}
+
+# $1 = package name(s) -> copy-pasteable install command for this host
+oe_install_cmd() {
+  case $(oe_pkg_mgr) in
+    apt-get) printf 'sudo apt-get install -y %s' "$1" ;;
+    dnf|yum) printf 'sudo %s install -y %s' "$(oe_pkg_mgr)" "$1" ;;
+    pacman)  printf 'sudo pacman -S --needed %s' "$1" ;;
+    zypper)  printf 'sudo zypper install %s' "$1" ;;
+    apk)     printf 'sudo apk add %s' "$1" ;;
+    brew)    printf 'brew install %s' "$1" ;;
+    *)       printf '# install %s with your package manager' "$1" ;;
+  esac
+}
+
+# $1 = package/command name -> indented, copy-pasteable install instructions
+oe_pkg_hint() {
+  local c=$1 mgr; mgr=$(oe_pkg_mgr)
+  case "$c" in
+    docker)
+      if [ "$mgr" = brew ]; then
+        cat <<'EOF'
+      Docker Desktop bundles the compose v2 plugin:
+             brew install --cask docker        # then launch Docker once
+             https://docs.docker.com/desktop/install/mac-install/
+EOF
+      else
+        cat <<'EOF'
+      Docker Engine + the compose v2 plugin:
+             curl -fsSL https://get.docker.com | sudo sh
+             sudo systemctl enable --now docker
+             sudo usermod -aG docker "$USER"    # log out/in (or: newgrp docker)
+EOF
+        printf '             or from the distro: %s\n' \
+          "$(oe_install_cmd 'docker-ce docker-ce-cli containerd.io docker-compose-plugin')"
+      fi ;;
+    compose)
+      printf '      the compose v2 *plugin* — the standalone docker-compose v1 is not supported:\n'
+      printf '             curl -fsSL https://get.docker.com | sudo sh   # engine + plugin\n'
+      case $mgr in
+        apt-get) printf '             # or: sudo apt-get install -y docker-compose-v2    (Ubuntu 23.04+)\n' ;;
+        dnf|yum) printf '             # or: %s\n' "$(oe_install_cmd docker-compose-plugin)" ;;
+        pacman)  printf '             # or: sudo pacman -S docker-compose    (v2 in Arch)\n' ;;
+        *)       printf '             # packages: docker-compose-plugin (Docker repo), docker-compose-v2 (Ubuntu 23.04+), docker-compose (Arch)\n' ;;
+      esac ;;
+    node|npm)
+      case $mgr in
+        brew) printf '      brew install node@20      (or a version manager: https://github.com/nvm-sh/nvm)\n' ;;
+        apt-get)
+          if oe_have curl; then
+            printf '      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs\n'
+            printf '             # or: %s   (18+ on recent releases)\n' "$(oe_install_cmd 'nodejs npm')"
+          else
+            printf '      %s   (18+ on recent releases)\n' "$(oe_install_cmd 'nodejs npm')"
+          fi ;;
+        dnf|yum)
+          if oe_have curl; then
+            printf '      curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - && %s\n' "$(oe_install_cmd nodejs)"
+            printf '             # or: %s   (18+ on recent releases)\n' "$(oe_install_cmd 'nodejs npm')"
+          else
+            printf '      %s   (18+ on recent releases)\n' "$(oe_install_cmd 'nodejs npm')"
+          fi ;;
+        pacman) printf '      sudo pacman -S --needed nodejs npm\n' ;;
+        apk)    printf '      sudo apk add nodejs npm\n' ;;
+        *)      printf '      install Node.js 20 LTS (npm ships with it): https://nodejs.org/en/download\n' ;;
+      esac ;;
+    jq|curl|openssl|bash|git|lsof)
+      case "$c:$mgr" in
+        curl:brew)    printf '      preinstalled on macOS (reinstall with: brew install curl)\n' ;;
+        openssl:brew) printf '      preinstalled on macOS (LibreSSL is fine)\n' ;;
+        bash:brew)    printf '      preinstalled (the bundled 3.2 works too)\n' ;;
+        lsof:*)       printf '      optional, only port-conflict checks in ./customize.sh use it: %s\n' "$(oe_install_cmd lsof)" ;;
+        *)            printf '      %s\n' "$(oe_install_cmd "$c")" ;;
+      esac ;;
+    *) printf '      %s\n' "$(oe_install_cmd "$c")" ;;
+  esac
+}
+
+# $1 = command -> "MISSING <cmd> — <what it is for>" + install hint
+oe_missing_tool() {
+  local c=$1 why=''
+  case "$c" in
+    bash)    why='the scripts are bash' ;;
+    curl)    why='RPC / Pinata / faucet HTTP calls' ;;
+    jq)      why='parsing JSON from the RPC, keystore and compose' ;;
+    openssl) why='generating the Elasticsearch password' ;;
+    node)    why='chain + keystore tooling (scripts/oe-keys.cjs) — Node.js 18 or newer' ;;
+    npm)     why='installing the keystore tooling (ethers) into .tools/' ;;
+    docker)  why='running the stack (Docker Engine + compose v2 plugin)' ;;
+    *)       why="required by the scripts" ;;
+  esac
+  printf '%sMISSING%s %s — %s\n' "$C_RED" "$C_OFF" "$c" "$why" >&2
+  oe_pkg_hint "$c" >&2
+}
+
+# 0 when version $1 >= $2 (dotted numeric, missing parts count as 0)
+oe_ver_ge() {
+  local have="${1#v}.0.0" need="${2#v}.0.0" i a b
+  for i in 1 2 3; do
+    a=$(printf '%s' "$have" | cut -d. -f"$i"); a=${a%%[!0-9]*}
+    b=$(printf '%s' "$need" | cut -d. -f"$i"); b=${b%%[!0-9]*}
+    [ -n "$a" ] || a=0; [ -n "$b" ] || b=0
+    if [ "$a" -gt "$b" ]; then return 0; fi
+    if [ "$a" -lt "$b" ]; then return 1; fi
+  done
+  return 0
+}
+
+# Preflight with per-tool fix instructions.
+#   oe_preflight core  — customize.sh: everything incl. node/npm/docker + daemon
+#   oe_preflight run   — start.sh: docker, compose, node, jq, curl
+#   oe_preflight fund  — fund.sh: node, npm, jq, curl
+oe_preflight() {
+  local mode=${1:-core} c os missing=() problems=0
+  local need=(bash curl jq)
+  case $mode in
+    core) need=(bash curl jq openssl node npm docker) ;;
+    run)  need=(bash curl jq node npm docker) ;;
+    fund) need=(bash curl jq node npm) ;;
+  esac
+  os=$(oe_os_family)
+  oe_info "  ${C_DIM}host: $(uname -s) $(uname -r) $(uname -m) — ${os}, pkg: $(oe_pkg_mgr)${C_OFF}"
+  if oe_have findmnt && findmnt -T "${ROOT:-$PWD}" -o OPTIONS -n 2>/dev/null | grep -q 'noexec'; then
+    oe_warn "this directory is on a noexec mount — ./start.sh cannot be executed directly; run: bash start.sh"
+  fi
+
+  for c in "${need[@]}"; do
+    oe_have "$c" || missing+=("$c")
+  done
+
+  # node/npm: presence + version floor
+  if oe_have node; then
+    local nv; nv=$(node --version 2>/dev/null | tr -d 'v')
+    if oe_ver_ge "$nv" 18; then
+      oe_ok "node $(node --version)$(oe_have npm && printf ' / npm %s' "$(npm --version 2>/dev/null)")"
+    else
+      oe_warn "node $(node --version) is too old — the keystore tooling needs Node.js 18 or newer"
+      oe_pkg_hint node >&2
+      problems=$((problems + 1))
+    fi
+  fi
+  if oe_have jq;   then oe_ok "jq $(jq --version 2>/dev/null | sed 's/^jq-//')"; fi
+  if oe_have curl; then oe_ok "curl $(curl --version 2>/dev/null | head -1 | awk '{print $2}')"; fi
+  if [[ " ${need[*]} " == *" openssl "* ]] && oe_have openssl; then
+    oe_ok "openssl $(openssl version 2>/dev/null | awk '{print $2}')"
+  fi
+
+  # docker: version, compose v2 plugin, reachable daemon
+  if [[ " ${need[*]} " == *" docker "* ]] && oe_have docker; then
+    local dv; dv=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,)
+    oe_ok "docker ${dv}"
+    if docker compose version >/dev/null 2>&1; then
+      oe_ok "docker compose $(docker compose version --short 2>/dev/null)"
+    else
+      printf '%sMISSING%s docker compose v2 (the "docker-compose" v1 binary is not supported)\n' "$C_RED" "$C_OFF" >&2
+      oe_pkg_hint compose >&2
+      problems=$((problems + 1))
+    fi
+    if docker info >/dev/null 2>&1; then
+      oe_ok "docker daemon reachable"
+    else
+      printf '%sMISSING%s docker daemon not reachable (permission denied or not running)\n' "$C_RED" "$C_OFF" >&2
+      case $os in
+        macos) printf '      start Docker Desktop (or: open -a Docker) and re-run\n' >&2 ;;
+        *)     printf '      sudo systemctl enable --now docker\n      sudo usermod -aG docker "$USER"   # then log out/in (or: newgrp docker)\n' >&2 ;;
+      esac
+      problems=$((problems + 1))
+    fi
+  fi
+
+  for c in ${missing[@]+"${missing[@]}"}; do oe_missing_tool "$c"; done
+  problems=$((problems + ${#missing[@]}))
+
+  # optional, never fatal
+  oe_have lsof || oe_warn "lsof not found — port-conflict checks in ./customize.sh will be skipped"
+
+  if [ "$problems" -gt 0 ]; then
+    oe_die "$problems prerequisite problem(s) — fix the items above and re-run. Full list: README → Requirements"
+  fi
+  oe_ok "all prerequisites present"
+}
+
 oe_require_cmd() {
   local missing=() c
   for c in "$@"; do oe_have "$c" || missing+=("$c"); done
   if [ ${#missing[@]} -gt 0 ]; then
+    for c in ${missing[@]+"${missing[@]}"}; do oe_missing_tool "$c"; done
     oe_die "missing required command(s): ${missing[*]}"
   fi
 }

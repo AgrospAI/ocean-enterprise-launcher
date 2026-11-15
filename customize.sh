@@ -19,6 +19,10 @@
 #   ./customize.sh --non-interactive --password-file /path/pw [--yes] ...
 #   ./customize.sh --help
 # =============================================================================
+if [ -z "${BASH_VERSION:-}" ]; then
+  printf '%s\n' 'error: this script needs bash — run ./customize.sh, or: bash customize.sh' >&2
+  exit 1
+fi
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -198,15 +202,9 @@ printf '%s\n' "${C_BOLD}Ocean Enterprise launcher — configuration${C_OFF}"
 printf '%s\n' "${C_DIM}marketplace + OE Node (no SSI) on OP Sepolia${C_OFF}"
 
 oe_step "Checking prerequisites"
-oe_require_cmd bash curl jq openssl node npm docker
-docker compose version >/dev/null 2>&1 || oe_die "docker compose v2 is required (docker compose version failed)"
-if ! docker info >/dev/null 2>&1; then
-  oe_warn "the Docker daemon does not look reachable — fix that before ./start.sh"
-else
-  oe_ok "docker $(docker --version | awk '{print $3}' | tr -d ,) / compose $(docker compose version --short 2>/dev/null)"
-fi
+oe_preflight core
 oe_ensure_ethers
-oe_ok "node $(node --version), jq $(jq --version)"
+oe_ok "keystore tooling ready (.tools/node_modules/ethers)"
 
 # ------------------------------------------------------- existing settings ---
 ENV_FILE="$ROOT/.env"

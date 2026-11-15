@@ -25,6 +25,10 @@
 #   ./fund.sh --bridge-only       # skip the faucet wait (L1 already funded)
 #   ./fund.sh --min-eth 0.01 --keep-eth 0.005 --faucet-wait 3600
 # =============================================================================
+if [ -z "${BASH_VERSION:-}" ]; then
+  printf '%s\n' 'error: this script needs bash — run ./fund.sh, or: bash fund.sh' >&2
+  exit 1
+fi
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -113,7 +117,7 @@ fi
 L2_RPC=$(oe_env_get RPC_URL '')
 CHAIN_ID=$(oe_env_get CHAIN_ID 11155420)
 [ -n "$L2_RPC" ] || oe_die "RPC_URL is empty in .env"
-oe_have jq || oe_die "jq is required"
+oe_preflight fund
 
 oe_step "Tooling"
 oe_ensure_ethers >/dev/null   # keep its "installing" chatter out of captured JSON

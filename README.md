@@ -10,6 +10,126 @@ core for a working dataspace where assets can be **published and consumed**, wit
 | OE Node       | `registry.agrospai.udl.cat/library/oe-node:latest`            | http://localhost:8000    |
 | Elasticsearch | `elasticsearch:9.3.4` (internal)                              | :9200 (diagnostics only) |
 
+## Requirements
+
+Everything here is checked before anything is written or started: `./customize.sh`
+and `./start.sh` run a preflight that lists every tool with its version and, for
+anything missing, the exact install command for your OS.
+
+### Host
+
+| | Minimum | Recommended |
+|---|---------|-------------|
+| OS | Ubuntu 22.04+/Debian 12, RHEL/Rocky 9, macOS 13+ (anything running Docker) | Ubuntu 24.04 LTS |
+| CPU | 2 vCPU, `x86_64` or `arm64` | 4 vCPU |
+| RAM | 4 GB free for Docker | 8 GB |
+| Disk | 20 GB free | 40 GB (+ C2D storage) |
+| Shell | bash 3.2+ | bash 5 |
+
+Elasticsearch is capped at a 1 GB heap by `docker-compose.yml` and the node keeps
+its DDO cache in RAM, so ~2 GB is used at rest — keep headroom for publishing and
+for C2D jobs, which need extra disk for the datasets they stage.
+
+### Software
+
+| Tool | Version | Needed for | Ubuntu/Debian install |
+|------|---------|-----------|------------------------|
+| `docker` | Engine 24+ | running the stack | `curl -fsSL https://get.docker.com \| sudo sh` |
+| `docker compose` | **v2 plugin** (not the old `docker-compose` v1) | `docker compose up` | ships with Docker Desktop; on Linux: `sudo apt-get install -y docker-compose-plugin` |
+| `node` | 18+ (20 LTS tested) | keystore + chain tooling (`scripts/oe-keys.cjs`) | `curl -fsSL https://deb.nodesource.com/setup_20.x \| sudo -E bash - && sudo apt-get install -y nodejs` |
+| `npm` | ships with `node` | installs `ethers` once into `.tools/` | ↑ same package |
+| `jq` | 1.6+ | parsing RPC / keystore / compose JSON | `sudo apt-get install -y jq` |
+| `curl` | any | RPC, Pinata, faucet calls | `sudo apt-get install -y curl` |
+| `openssl` | any (`LibreSSL` is fine) | generating the Elasticsearch password | `sudo apt-get install -y openssl` |
+| `git` | any | cloning this repo | `sudo apt-get install -y git` |
+| `lsof` | optional | port-conflict checks in `customize.sh` (skipped if absent) | `sudo apt-get install -y lsof` |
+
+macOS: `brew install --cask docker && brew install node@20 jq` — `curl`, `openssl`
+and `lsof` are preinstalled.
+
+### Docker post-install (Linux hosts)
+
+The scripts must run as your own user, never under `sudo` (otherwise `.env`,
+keystores and `oe-node-databases/` end up root-owned). On a fresh VM:
+
+```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"      # then log out and back in, or: newgrp docker
+docker run --rm hello-world          # must not need sudo
+```
+
+On macOS, start Docker Desktop before running the scripts — the preflight reports
+`docker daemon not reachable` otherwise.
+
+### Windows
+
+Native Windows is **not** supported: the launcher is a set of bash scripts that
+assume POSIX paths and use `chmod 600` to protect `.env` and the keystores —
+neither exists on NTFS. Use **WSL2**, where everything runs unmodified:
+
+```powershell
+wsl --install -d Ubuntu-24.04     # then open "Ubuntu 24.04" from the Start menu
+```
+
+Inside that shell, follow [Starting from a fresh cloud VM](#starting-from-a-fresh-cloud-vm)
+with either Docker Desktop (enable *Settings → Resources → WSL integration* for
+the distro — it provides `docker` plus the `/var/run/docker.sock` that C2D needs)
+or Docker Engine installed in the distro itself.
+
+Keep the repo in the Linux filesystem (`~/ocean-enterprise-launcher`), **not**
+under `/mnt/c/…`: the relative bind mounts (`oe-node-databases/`, `oe-node-logs/`,
+`oe-node-c2d-storage/`) are very slow on DrvFs, and `chmod` is a no-op there, so
+private keys would stay world-readable.
+
+Git Bash / MSYS mostly runs the scripts but is unsupported: `chmod` on NTFS does
+nothing, MSYS path conversion can mangle the relative volume paths handed to
+`docker compose`, and the preflight cannot identify the OS (it reports
+`unknown`, so the hints are generic). Use WSL2.
+
+### Network
+
+* Outbound **HTTPS 443** to: `registry.agrospai.udl.cat` (node/market images),
+  `registry-1.docker.io` + `auth.docker.io` (Elasticsearch image), `docker.elastic.co`,
+  `api.pinata.cloud` / `gateway.pinata.cloud` (asset publishing), your RPC endpoint
+  (default `https://sepolia.optimism.io`), `sepolia-faucet.pk910.de` (only for `./fund.sh`).
+* Inbound: **8080** (marketplace UI) and **8000** (node HTTP API — the browser talks
+  to it directly, and it carries the P2P endpoints used to federate with other
+  nodes). Both are configurable in `customize.sh`. Keep **9200** (Elasticsearch)
+  closed to the internet; it is published on localhost for diagnostics only.
+* Publish assets only if the node URL is publicly reachable; using `localhost`
+  works for a single-machine demo but other nodes cannot fetch from it.
+
+### Starting from a fresh cloud VM
+
+```bash
+# 1. tools
+sudo apt-get update && sudo apt-get install -y curl jq openssl lsof git
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER" && newgrp docker
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
+
+# 2. code
+git clone <this repo> ocean-enterprise-launcher && cd ocean-enterprise-launcher
+
+# 3. configure (prompts; needs a Pinata JWT — see below), then launch
+./customize.sh
+./start.sh
+```
+
+Open the security-group / firewall for 8080 and 8000, then browse to
+`http://<vm-ip>:8080`. Fully unattended installs:
+
+```bash
+echo 'my-keystore-password' > /root/oe.pw      # keep it out of the repo
+./customize.sh --non-interactive --password-file /root/oe.pw \
+  --node-url http://<vm-ip>:8000 --rpc-url https://sepolia.optimism.io \
+  --ipfs-jwt "$PINATA_JWT" --no-start
+./start.sh --head
+```
+
+See `./customize.sh --help` for every flag, `./start.sh --help` for launch
+options, and [Troubleshooting](#troubleshooting) for the errors seen most often.
+
 ## Quick start
 
 ```bash
@@ -25,7 +145,9 @@ never stored in clear text. The Docker daemon (Docker Desktop) must be running.
 
 Requirements: `bash`, `docker` + `docker compose` v2, `curl`, `jq`, `openssl`,
 `node`/`npm` (used once to install `ethers` into `.tools/` for keystore and
-chain tooling).
+chain tooling). See [Requirements](#requirements) for versions, install commands
+and the network/ports to open — the scripts refuse to run with a checklist of
+what is missing.
 
 ## Configuration
 

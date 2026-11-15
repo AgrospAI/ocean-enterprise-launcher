@@ -26,6 +26,10 @@
 # applies — the node resumes from its own index. To start over:
 #   docker compose down -v && rm -rf oe-node-databases
 # =============================================================================
+if [ -z "${BASH_VERSION:-}" ]; then
+  printf '%s\n' 'error: this script needs bash — run ./start.sh, or: bash start.sh' >&2
+  exit 1
+fi
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -69,8 +73,8 @@ IPFS_JWT=$(oe_env_get IPFS_JWT '')
 [ -n "$RPC_URL" ] || oe_die "RPC_URL is empty in .env"
 [[ $START_BLOCK =~ ^[0-9]+$ ]] || START_BLOCK=0
 
-oe_have docker || oe_die "docker is required"
-docker compose version >/dev/null 2>&1 || oe_die "docker compose v2 is required"
+oe_step "Checking prerequisites"
+oe_preflight run
 
 if [ -z "$IPFS_JWT" ]; then
   oe_warn "IPFS_JWT is empty in .env — publishing assets from the marketplace will fail"
