@@ -84,13 +84,100 @@ services:
       MAX_REQ_PER_MINUTE: '10000'
       MAX_CONNECTIONS_PER_MINUTE: '10000'
       DASHBOARD: 'true'
+      # --- Compute-to-Data (C2D) ------------------------------------------------
+      # Two Docker-engine environments, sized so it stays feasible on a laptop:
+      #   free:  free, 1 vCPU / 1 GB RAM / 1 GB disk, <= 10 min, 1 job
+      #   paid:  devEURAU per minute, 2 vCPU / 3 GB RAM / 5 GB disk, <= 30 min, 1 job
+      # Admission control is per environment (`resources[].total` against that
+      # environment's running jobs, `max` = per-job cap) plus a global check
+      # against the SUM of all environments' totals. The connection-level
+      # `resources` below does not cap that sum: it only clamps what each
+      # environment may declare and supplies the default per-job `max`
+      # (hardware-level knobs like `init`/`cpuList` belong there too).
+      # The free environment omits its own `resources` on purpose: the loader
+      # fills cpu/ram/disk from the pool, so the env-level and global checks see
+      # the pool while `free.resources` stays the binding budget for free jobs.
+      # `free.resources` is mandatory — without it free jobs are rejected with
+      # "No such free resource cpu".
+      # Job cost = price x amount x ceil(duration / 60) in token units.
+      # Removing this variable (and the socket mount below) disables C2D.
+      DOCKER_COMPUTE_ENVIRONMENTS: |
+        [{
+          "socketPath": "/var/run/docker.sock",
+          "imageRetentionDays": 3,
+          "resources": [
+            {"id": "cpu",  "total": 2,  "max": 2, "min": 1},
+            {"id": "ram",  "total": 3,  "max": 3, "min": 1},
+            {"id": "disk", "total": 5,  "max": 5, "min": 1}
+          ],
+          "environments": [
+            {
+              "id": "free",
+              "description": "Free C2D on this host: 1 vCPU, 1 GB RAM, 1 GB disk, max 10 min, 1 concurrent job",
+              "storageExpiry": 7200,
+              "minJobDuration": 60,
+              "maxJobDuration": 600,
+              "maxJobs": 1,
+              "fees": {
+                "11155420": [
+                  {
+                    "feeToken": "${DEVEURAU_ADDRESS}",
+                    "prices": [
+                      {"id": "cpu",  "price": 0},
+                      {"id": "ram",  "price": 0},
+                      {"id": "disk", "price": 0}
+                    ]
+                  }
+                ]
+              },
+              "free": {
+                "minJobDuration": 60,
+                "maxJobDuration": 600,
+                "maxJobs": 1,
+                "resources": [
+                  {"id": "cpu",  "total": 1, "max": 1, "min": 1},
+                  {"id": "ram",  "total": 1, "max": 1, "min": 1},
+                  {"id": "disk", "total": 1, "max": 1, "min": 1}
+                ]
+              },
+              "enableNetwork": false
+            },
+            {
+              "id": "paid",
+              "description": "Paid C2D on this host: 2 vCPU, 3 GB RAM, 5 GB disk, max 30 min, 1 concurrent job (devEURAU per minute)",
+              "storageExpiry": 7200,
+              "minJobDuration": 60,
+              "maxJobDuration": 1800,
+              "maxJobs": 1,
+              "fees": {
+                "11155420": [
+                  {
+                    "feeToken": "${DEVEURAU_ADDRESS}",
+                    "prices": [
+                      {"id": "cpu",  "price": 0.001},
+                      {"id": "ram",  "price": 0.001},
+                      {"id": "disk", "price": 0.0001}
+                    ]
+                  }
+                ]
+              },
+              "resources": [
+                {"id": "cpu",  "total": 2, "max": 2, "min": 1},
+                {"id": "ram",  "total": 3, "max": 2, "min": 1},
+                {"id": "disk", "total": 5, "max": 5, "min": 1}
+              ],
+              "enableNetwork": false
+            }
+          ]
+        }]
     volumes:
       - ./oe-node-logs:/usr/src/app/logs
       - ./oe-node-c2d-storage:/usr/src/app/c2d_storage
       - ./oe-node-databases:/usr/src/app/databases
-      # [CUSTOMIZE] Uncomment ONLY if you enable a Compute-to-Data environment
-      # (DOCKER_COMPUTE_ENVIRONMENTS). Grants the node container Docker control:
-      # - /var/run/docker.sock:/var/run/docker.sock
+      # C2D: lets the node start/stop job containers on the Docker host.
+      # This is equivalent to root on the host — remove it (and the variable
+      # above) on any deployment that should not run compute jobs.
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - backend
 

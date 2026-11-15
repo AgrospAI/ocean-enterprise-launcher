@@ -377,13 +377,44 @@ an OE Node).
 > `OE_NODE_URL` to the node's public URL and put both services behind a
 > TLS-terminating reverse proxy (docs "post installation steps").
 
+## Compute-to-Data (C2D)
+
+Enabled in `docker-compose.yml` with two Docker-engine environments on the local
+daemon, sized for a laptop:
+
+| Environment | Cost | vCPU / RAM / disk | Max job | Concurrent |
+|---|---|---|---|---|
+| `free` | free | 1 / 1 GB / 1 GB | 10 min | 1 |
+| `paid` | devEURAU, price/minute | 2 / 3 GB / 5 GB (2 GB per job) | 30 min | 1 |
+
+Job cost = `price × amount × ceil(minutes)`. The paid environment costs
+`2×0.0001 + 3×0.0001 + 5×0.00001 = 0.00055` devEURAU per minute, so a 30-minute
+job is ≈ `0.0165`. The paid token must be accepted by the chain's
+`EnterpriseFeeCollector` (devEURAU is; the node validates at boot).
+
+The node needs Docker control, hence `/var/run/docker.sock` is mounted — that is
+equivalent to root on the host. To disable C2D, delete `DOCKER_COMPUTE_ENVIRONMENTS`
+and the socket mount, then `docker compose up -d --force-recreate oe-node`.
+
+Verify what the node advertises:
+
+```bash
+curl -s http://localhost:8000/api/services/computeEnvironments | jq -r '.[].description'
+curl -s -X POST http://localhost:8000/directCommand \
+  -H 'Content-Type: application/json' -d '{"command":"status","detailed":true}' | jq '.c2dClusters'
+```
+
+Then publish (or use) an asset whose DDO carries a **compute** service — the
+asset's *Compute* tab lists both environments and the price is quoted from the
+node's fee table before the job is queued.
+
 ## What is NOT included
 
 * **SSI stack** (wallet, verifier), **Policy Server / Policy Server Proxy**,
   **Signer Server**, **User Management Package** — `NEXT_PUBLIC_SSI_ENABLED=false`
   and `POLICY_SERVER_URL` left empty, per the no-SSI deployment mode.
-* **Compute-to-Data** — add a `DOCKER_COMPUTE_ENVIRONMENTS` value and mount
-  `/var/run/docker.sock` (commented in `docker-compose.yml`) to enable it.
+* **GPU / Kubernetes C2D clusters** — only the local Docker-engine environments
+  above; `OPERATOR_SERVICE_URL` (OPF K8s) is not configured.
 * **Reverse proxy / TLS** — add nginx/Caddy in front of 8080/8000 for anything
   beyond local testing.
 
@@ -417,53 +448,6 @@ oe-node-c2d-storage/ # C2D storage        (created at runtime)
 | Asset publishes ("success") but never appears in the catalogue; its own `/asset/did:ope:…` page works | (1) the DDO's `serviceEndpoint` must be **slash-free** — assets published while `NEXT_PUBLIC_PROVIDER_URL` ended in `/` need republishing; (2) the index was created by a node build that mapped `credentialSubject.services` as a **`nested`** field, so the market's plain `terms` filter on `…serviceEndpoint.keyword` can never match. Elasticsearch cannot change a mapping in place: rebuild the index with `docker compose down -v && ./start.sh` (reindexes from `START_BLOCK`) |
 | Unsure what compose will run | `./start.sh --dry-run` |
 
-## Catalogue visibility
-
-Two independent conditions decide whether a published asset reaches `/search`.
-Its own `/asset/did:ope:…` page works either way — that page reads the DDO from
-the node, not through the catalogue query.
-
-1. **The DDO's `serviceEndpoint` must be slash-free** (`http://localhost:8000`,
-   not `…/`). The market builds the filter with a trailing slash and the node
-   strips trailing slashes before querying Elasticsearch, so a DDO that carries
-   the slash never matches. `NEXT_PUBLIC_PROVIDER_URL` writes the DDO, so it
-   stays `${OE_NODE_URL}`; `NEXT_PUBLIC_NODE_URI_INDEXED` is slash-free for the
-   same reason, while `NEXT_PUBLIC_METADATACACHE_URI` keeps its slash.
-
-2. **The node must create `op_ddo_v5.0.0` with `credentialSubject.services` as a
-   plain object.** The market's clause is a non-nested `terms` on
-   `credentialSubject.services.serviceEndpoint.keyword`, a path that only exists
-   when `services` is a plain object (with `serviceEndpoint` as `text` plus a
-   `.keyword` subfield). Node builds that map `services` as `nested` — with a
-   bare keyword `serviceEndpoint` and no subfield — produce an index the clause
-   can never match. This is a property of the index mapping, not of the URL.
-
-The node image used here emits the object layout, so a fresh deployment needs no
-intervention. Elasticsearch cannot change a mapping in place: an index created by
-an older node build keeps `nested` for its lifetime and must be rebuilt —
-
-```bash
-docker compose down -v && ./start.sh    # reindexes from START_BLOCK
-```
-
-Assets published before `START_BLOCK` are not re-indexed; publish them again (or
-relaunch with an earlier start block) if they must reappear.
-
-Confirm with the market's own clause (1 hit means both conditions hold):
-
-```bash
-PW=$(grep '^ELASTIC_PASSWORD=' .env | cut -d= -f2-)
-curl -s -u "elastic:$PW" -H 'Content-Type: application/json' \
-  'http://localhost:9200/op_ddo_v5.0.0/_search' \
-  -d '{"size":0,"query":{"terms":{"credentialSubject.services.serviceEndpoint.keyword":["http://localhost:8000"]}}}'
-# and the mapping itself:
-curl -s -u "elastic:$PW" 'http://localhost:9200/op_ddo_v5.0.0/_mapping' | grep -o '"services":{[^}]*}'
-```
-
-Deployments whose index was created by an older node keep the old mapping too
-(`services` as a plain object with a `serviceEndpoint` **text** field plus a
-`.keyword` subfield), which is why their catalogue works unchanged —
-`market.agrospai.udl.cat` is one of them.
 
 ## Teardown
 
